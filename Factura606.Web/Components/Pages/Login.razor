@@ -1,0 +1,193 @@
+@page "/login"
+@attribute [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+@using Factura606.Core.Services
+@inject GestorPin GestorPin
+
+<PageTitle>QuickFiscal — Ingresar</PageTitle>
+
+@{
+    var existePin = GestorPin.ExistePin();
+    var modoInicial = !existePin || Modo == "crear" ? "crear" : "ingresar";
+}
+
+<div class="login-shell">
+    <div class="login-card tarjeta-qf">
+        <div class="login-logo">QF</div>
+        <h1>Hola, qué bueno verte</h1>
+        <p class="texto-cuerpo-grande login-subtitulo">Escribe tus cuatro números para entrar a tus facturas.</p>
+
+        @if (existePin)
+        {
+            <div class="login-toggle" role="tablist">
+                <button type="button" class="login-toggle-btn @(modoInicial == "ingresar" ? "activo" : "")" data-modo="ingresar">Ingresar mi PIN</button>
+                <button type="button" class="login-toggle-btn @(modoInicial == "crear" ? "activo" : "")" data-modo="crear">Crear mi PIN</button>
+            </div>
+        }
+        else
+        {
+            <p class="texto-apoyo">Primer uso — crea el PIN de esta instalación.</p>
+        }
+
+        @if (Error == "incorrecto")
+        {
+            <p class="login-error">PIN incorrecto. Intentos restantes: @Intentos.</p>
+        }
+        else if (Error == "bloqueado")
+        {
+            <p class="login-error">Demasiados intentos fallidos. Espera @Segundos segundos e intenta de nuevo.</p>
+        }
+        else if (Error == "corto")
+        {
+            <p class="login-error">El PIN debe tener 4 dígitos.</p>
+        }
+        else if (Error == "no-coincide")
+        {
+            <p class="login-error">Los dos PIN no coinciden — inténtalo de nuevo.</p>
+        }
+        else if (Error == "ya-existe")
+        {
+            <p class="login-error">Ya hay un PIN configurado.</p>
+        }
+
+        <div class="pin-dots" id="pinDots">
+            <span class="pin-dot"></span><span class="pin-dot"></span><span class="pin-dot"></span><span class="pin-dot"></span>
+        </div>
+        <p class="texto-apoyo pin-paso" id="pinPaso">&nbsp;</p>
+
+        <form method="post" action="/account/login" id="formIngresar" style="display:none">
+            <input type="hidden" name="pin" id="campoPinIngresar" />
+        </form>
+        <form method="post" action="/account/crear-pin" id="formCrear" style="display:none">
+            <input type="hidden" name="pin" id="campoPinCrear" />
+            <input type="hidden" name="confirmacion" id="campoConfirmacion" />
+        </form>
+
+        <div class="teclado">
+            @foreach (var n in new[] { "1", "2", "3", "4", "5", "6", "7", "8", "9" })
+            {
+                <button type="button" class="tecla" data-digito="@n">@n</button>
+            }
+            <button type="button" class="tecla tecla-texto" id="btnLimpiar">Limpiar</button>
+            <button type="button" class="tecla" data-digito="0">0</button>
+            <button type="button" class="tecla tecla-texto" id="btnBorrar">Borrar</button>
+        </div>
+    </div>
+</div>
+
+<style>
+    .login-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem 1rem; }
+    .login-card { padding: 2.5rem; width: 360px; max-width: 100%; text-align: center; }
+    .login-card .login-logo { margin: 0 auto 1.25rem; } /* centrado y con separación, solo en esta pantalla */
+    .login-card h1 { font-size: 28px; margin-bottom: .5rem; }
+    .login-subtitulo { color: var(--ink2); margin-bottom: 1.25rem; }
+    .login-toggle { display: flex; gap: .5rem; justify-content: center; margin-bottom: 1rem; }
+    .login-toggle-btn {
+        border: 1px solid var(--line); background: var(--surface); color: var(--ink2);
+        border-radius: var(--pill); padding: .5rem 1rem; font-family: var(--font); font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .login-toggle-btn.activo { border-color: var(--brand); color: var(--brand); background: var(--brand-t); }
+    .login-error { color: var(--b-ink); background: var(--b-bg); border-radius: 8px; padding: .5rem .75rem; font-size: 15px; margin-bottom: 1rem; }
+    .pin-dots { display: flex; gap: .75rem; justify-content: center; margin: 1rem 0 .25rem; }
+    .pin-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); transition: background-color .1s, border-color .1s; }
+    .pin-dot.lleno { background: var(--brand); border-color: var(--brand); }
+    .pin-paso { min-height: 1.2em; margin-bottom: 1rem; }
+    .teclado { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
+    .tecla {
+        height: 56px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface);
+        font-family: var(--font); font-size: 21px; font-weight: 600; color: var(--ink); cursor: pointer;
+    }
+    .tecla:hover { background: var(--sunken); }
+    .tecla:active { background: var(--brand-t); border-color: var(--brand); }
+    .tecla-texto { font-size: 14px; font-weight: 600; color: var(--ink2); }
+</style>
+
+<script>
+(function () {
+    const LARGO_PIN = 4;
+    let modo = '@modoInicial';
+    let paso1 = null; // primer PIN escrito en modo "crear", mientras se pide confirmación
+    let digitos = [];
+
+    const dots = document.querySelectorAll('.pin-dot');
+    const pasoTexto = document.getElementById('pinPaso');
+    const toggles = document.querySelectorAll('.login-toggle-btn');
+
+    function actualizarDots() {
+        dots.forEach((d, i) => d.classList.toggle('lleno', i < digitos.length));
+    }
+
+    function actualizarPaso() {
+        pasoTexto.textContent = (modo === 'crear' && paso1) ? 'Confirma tu PIN' : ' ';
+    }
+
+    function reset() {
+        digitos = [];
+        actualizarDots();
+    }
+
+    toggles.forEach(btn => btn.addEventListener('click', () => {
+        modo = btn.dataset.modo;
+        paso1 = null;
+        reset();
+        actualizarPaso();
+        toggles.forEach(b => b.classList.toggle('activo', b === btn));
+    }));
+
+    document.getElementById('btnBorrar').addEventListener('click', () => {
+        digitos.pop();
+        actualizarDots();
+    });
+
+    document.getElementById('btnLimpiar').addEventListener('click', () => {
+        paso1 = null;
+        reset();
+        actualizarPaso();
+    });
+
+    document.querySelectorAll('.tecla[data-digito]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (digitos.length >= LARGO_PIN) return;
+            digitos.push(btn.dataset.digito);
+            actualizarDots();
+            if (digitos.length === LARGO_PIN) manejarPinCompleto();
+        });
+    });
+
+    function manejarPinCompleto() {
+        const pin = digitos.join('');
+        if (modo === 'ingresar') {
+            document.getElementById('campoPinIngresar').value = pin;
+            document.getElementById('formIngresar').submit();
+            return;
+        }
+
+        // modo crear
+        if (!paso1) {
+            paso1 = pin;
+            reset();
+            actualizarPaso();
+            return;
+        }
+
+        document.getElementById('campoPinCrear').value = paso1;
+        document.getElementById('campoConfirmacion').value = pin;
+        document.getElementById('formCrear').submit();
+    }
+
+    actualizarPaso();
+})();
+</script>
+
+@code {
+    [SupplyParameterFromQuery(Name = "modo")]
+    public string? Modo { get; set; }
+
+    [SupplyParameterFromQuery(Name = "error")]
+    public string? Error { get; set; }
+
+    [SupplyParameterFromQuery(Name = "intentos")]
+    public int Intentos { get; set; }
+
+    [SupplyParameterFromQuery(Name = "segundos")]
+    public int Segundos { get; set; }
+}

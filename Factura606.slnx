@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Factura606.Core/Factura606.Core.csproj" />
+  <Project Path="Factura606.Web/Factura606.Web.csproj" />
+</Solution>

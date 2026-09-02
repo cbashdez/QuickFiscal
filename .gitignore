@@ -1,0 +1,7 @@
+bin/
+obj/
+*.user
+
+# Datos locales de esta instalación: BD, PIN, fotos de facturas, plantilla DGII —
+# nunca deben subirse a un repo (son datos privados de Transporte Carretón JH SRL).
+Factura606.Web/App_Data/

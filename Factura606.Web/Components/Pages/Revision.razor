@@ -1,0 +1,664 @@
+@page "/"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using System.Globalization
+@using Factura606.Core.Models
+@using Factura606.Core.Services
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.Extensions.Options
+@inject FacturaService Facturas
+@inject ExtractorFactura Extractor
+@inject ConversorImagenService Conversor
+@inject IOptions<RutasOptions> RutasOpt
+@inject IWebHostEnvironment Env
+@inject ILogger<Revision> Logger
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+<PageTitle>QuickFiscal — Revisión</PageTitle>
+
+<div class="topbar">
+    <div class="marca-topbar">
+        <div class="login-logo login-logo-chico">QF</div>
+        <div>
+            <h1 class="titulo-topbar">QuickFiscal</h1>
+            <p class="texto-apoyo subtitulo-topbar">Declaración 606 · @MesActual</p>
+        </div>
+    </div>
+    <div class="acciones-top">
+        <div class="selector-archivos">
+            <label for="input-fotos" class="btn-qf btn-qf-primario"><Icono Nombre="subir" /> Subir fotos</label>
+            <InputFile id="input-fotos" OnChange="OnFilesSelected" multiple accept="image/*,.heic,.heif" />
+        </div>
+        <a class="btn-qf btn-qf-primario" href="/api/exportar"><Icono Nombre="descargar" /> Exportar a Excel</a>
+        <a class="btn-qf btn-qf-secundario" href="/api/respaldo"><Icono Nombre="respaldo" /> Respaldar base de datos</a>
+        <form method="post" action="/account/logout" style="display:inline">
+            <button type="submit" class="btn-qf btn-qf-texto"><Icono Nombre="salir" /> Salir</button>
+        </form>
+    </div>
+</div>
+
+@if (_procesando || _error is not null)
+{
+    <div class="estado-carga">
+        @if (_procesando)
+        {
+            <span class="texto-cuerpo" style="color:var(--brand)">Procesando @_procesados de @_totalProcesar…</span>
+        }
+        @if (_error is not null)
+        {
+            <span class="texto-cuerpo login-error">@_error</span>
+        }
+    </div>
+}
+
+@if (_facturas.Count == 0 && !_procesando)
+{
+    <div class="estado-vacio tarjeta-qf">
+        <h2>Todavía no hay facturas de @MesActual</h2>
+        <p class="texto-cuerpo-grande estado-vacio-sub">Sube las fotos y aquí van a aparecer una por una con sus datos ya leídos, listas para que las revises.</p>
+    </div>
+}
+else
+{
+    <div class="resumen-fila">
+        <div class="conteos">
+            @if (_facturas.Any(f => f.Estado == EstadoFactura.CamposFaltantes))
+            {
+                <button type="button" class="pastilla pastilla-roja pastilla-boton @(_filtroEstado == EstadoFactura.CamposFaltantes ? "pastilla-activa" : "")" @onclick="() => AlternarFiltro(EstadoFactura.CamposFaltantes)">
+                    @_facturas.Count(f => f.Estado == EstadoFactura.CamposFaltantes) con datos que faltan
+                </button>
+            }
+            @if (_facturas.Any(f => f.Estado == EstadoFactura.RevisarDudas))
+            {
+                <button type="button" class="pastilla pastilla-amarilla pastilla-boton @(_filtroEstado == EstadoFactura.RevisarDudas ? "pastilla-activa" : "")" @onclick="() => AlternarFiltro(EstadoFactura.RevisarDudas)">
+                    @_facturas.Count(f => f.Estado == EstadoFactura.RevisarDudas) por revisar
+                </button>
+            }
+            <button type="button" class="pastilla pastilla-verde pastilla-boton @(_filtroEstado == EstadoFactura.Completa ? "pastilla-activa" : "")" @onclick="() => AlternarFiltro(EstadoFactura.Completa)">
+                @_facturas.Count(f => f.Estado == EstadoFactura.Completa) completas
+            </button>
+            @if (_filtroEstado is not null)
+            {
+                <button type="button" class="btn-qf btn-qf-texto boton-ver-todas" @onclick="() => _filtroEstado = null">Ver todas</button>
+            }
+        </div>
+        <button class="btn-qf btn-qf-destructivo" disabled="@(_marcadas.Count == 0)" @onclick="() => _confirmandoEliminar = true">
+            Eliminar seleccionadas (@_marcadas.Count)
+        </button>
+    </div>
+    <p class="texto-apoyo orden-nota">Primero las que les faltan datos, después las de revisar, y al final las que ya están completas.</p>
+
+    <div class="contenido vista-escritorio">
+        <div class="tabla-wrap tarjeta-qf">
+            <table class="tabla-facturas" id="tabla-facturas">
+                <colgroup>
+                    <col style="width:36px" />
+                    <col style="width:190px" />
+                    <col style="width:110px" />
+                    <col style="width:150px" />
+                    <col style="width:150px" />
+                    <col style="width:90px" />
+                    <col style="width:100px" />
+                    <col style="width:220px" />
+                    <col style="width:220px" />
+                    <col style="width:56px" />
+                </colgroup>
+                <thead>
+                <tr>
+                    <th></th>
+                    <th>Estado</th>
+                    <th>RNC</th>
+                    <th>NCF</th>
+                    <th>Fecha</th>
+                    <th>ITBIS</th>
+                    <th>Total</th>
+                    <th>Categoría</th>
+                    <th>Forma de pago</th>
+                    <th>Foto</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var f in FacturasOrdenadas)
+                {
+                    var grupoDup = ObtenerGrupoDuplicado(f);
+                    <tr class="@(f.Id == _seleccionId ? "fila-seleccionada" : "") @(grupoDup is { } g ? $"fila-dup-{ColorDup(g)}" : "")" @onclick="() => _seleccionId = f.Id">
+                        <td @onclick:stopPropagation="true">
+                            <input type="checkbox" checked="@_marcadas.Contains(f.Id)" @onchange="e => AlternarSeleccion(f.Id, e.Value is true)" />
+                        </td>
+                        <td>
+                            <span class="pastilla @EstadoClase(f.Estado)">@EstadoTexto(f.Estado)</span>
+                            @if (grupoDup is not null)
+                            {
+                                <span class="pastilla pastilla-dup-@ColorDup(grupoDup.Value)" title="Otra factura tiene el mismo NCF — puede ser la misma compra fotografiada dos veces.">Dup @grupoDup</span>
+                            }
+                        </td>
+                        <td><input class="celda-qf @(string.IsNullOrWhiteSpace(f.Rnc) ? "celda-falta" : "")" placeholder="Falta" value="@f.Rnc" readonly='@(!EstaEditando(f.Id, "rnc"))' title="Doble clic para editar" @ondblclick='() => EmpezarEdicion(f.Id, "rnc")' @onblur="TerminarEdicion" @onchange="async e => { f.Rnc = e.Value?.ToString(); await GuardarAsync(f); }" /></td>
+                        <td><input class="celda-qf @(string.IsNullOrWhiteSpace(f.Ncf) ? "celda-falta" : "")" placeholder="Falta" value="@f.Ncf" readonly='@(!EstaEditando(f.Id, "ncf"))' title="Doble clic para editar" @ondblclick='() => EmpezarEdicion(f.Id, "ncf")' @onblur="TerminarEdicion" @onchange="async e => { f.Ncf = e.Value?.ToString(); await GuardarAsync(f); }" /></td>
+                        <td><input class="celda-qf @(f.Fecha is null ? "celda-falta" : "")" type="date" value="@(f.Fecha?.ToString("yyyy-MM-dd"))" readonly='@(!EstaEditando(f.Id, "fecha"))' title="Doble clic para editar" @ondblclick='() => EmpezarEdicion(f.Id, "fecha")' @onblur="TerminarEdicion" @onchange="async e => { f.Fecha = DateOnly.TryParse(e.Value?.ToString(), out var d) ? d : null; await GuardarAsync(f); }" /></td>
+                        <td><input class="celda-qf celda-num monto @(f.Itbis is null ? "celda-falta" : "")" placeholder="Falta" value="@f.Itbis" readonly='@(!EstaEditando(f.Id, "itbis"))' title="Doble clic para editar" @ondblclick='() => EmpezarEdicion(f.Id, "itbis")' @onblur="TerminarEdicion" @onchange="async e => { f.Itbis = ParseDecimal(e.Value); await GuardarAsync(f); }" /></td>
+                        <td><input class="celda-qf celda-num monto @(f.Total is null ? "celda-falta" : "")" value="@f.Total" readonly='@(!EstaEditando(f.Id, "total"))' title="Doble clic para editar" @ondblclick='() => EmpezarEdicion(f.Id, "total")' @onblur="TerminarEdicion" @onchange="async e => { f.Total = ParseDecimal(e.Value); await GuardarAsync(f); }" /></td>
+                        <td>
+                            <select class="celda-qf celda-select" value="@(f.Categoria ?? CodigosDgii606.CategoriaPorDefecto)" @onchange="async e => { f.Categoria = e.Value?.ToString(); await GuardarAsync(f); }">
+                                @foreach (var opcion in CodigosDgii606.TipoBienesYServiciosComprados)
+                                {
+                                    <option value="@opcion">@opcion</option>
+                                }
+                            </select>
+                        </td>
+                        <td>
+                            <select class="celda-qf celda-select" value="@(f.FormaPago ?? CodigosDgii606.FormaPagoPorDefecto)" @onchange="async e => { f.FormaPago = e.Value?.ToString(); await GuardarAsync(f); }">
+                                @foreach (var opcion in CodigosDgii606.FormaDePago)
+                                {
+                                    <option value="@opcion">@opcion</option>
+                                }
+                            </select>
+                        </td>
+                        <td @onclick:stopPropagation="true">
+                            <a class="btn-qf btn-qf-texto boton-foto" href="/api/fotos/@f.Id" target="_blank" title="Ver la foto"><Icono Nombre="foto" /></a>
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+            <p class="texto-apoyo pie-tabla">
+                Marca las casillas de la izquierda para eliminar varias facturas de una vez.
+                <strong class="monto">Total del mes: RD$ @TotalDelMes.ToString("N2", CultureInfo.InvariantCulture)</strong>
+            </p>
+        </div>
+
+        @if (_facturaSeleccionada is { } sel)
+        {
+            <div class="panel-detalle altura-panel tarjeta-qf">
+                <div class="panel-detalle-cabecera">
+                    <p class="texto-etiqueta etiqueta-panel">Factura seleccionada</p>
+                    <span class="pastilla @EstadoClase(sel.Estado)">@EstadoTexto(sel.Estado)</span>
+                </div>
+                <a href="/api/fotos/@sel.Id" target="_blank" class="ver-foto-grande">
+                    <img class="foto-preview" src="/api/fotos/@sel.Id" alt="Foto de la factura" />
+                    <span class="texto-apoyo">Ver la foto más grande ↗</span>
+                </a>
+
+                <dl class="panel-datos">
+                    <div><dt>RNC</dt><dd class="@(string.IsNullOrWhiteSpace(sel.Rnc) ? "dato-falta" : "")">@(sel.Rnc ?? "Falta")</dd></div>
+                    <div><dt>NCF</dt><dd class="@(string.IsNullOrWhiteSpace(sel.Ncf) ? "dato-falta" : "")">@(sel.Ncf ?? "Falta")</dd></div>
+                    <div><dt>Fecha</dt><dd class="@(sel.Fecha is null ? "dato-falta" : "")">@(sel.Fecha?.ToString("dd/MM/yyyy") ?? "Falta")</dd></div>
+                    <div><dt>ITBIS</dt><dd class="@(sel.Itbis is null ? "dato-falta" : "")">@(sel.Itbis is { } itbis ? itbis.ToString("N2", CultureInfo.InvariantCulture) : "Falta")</dd></div>
+                    <div><dt>Total</dt><dd class="@(sel.Total is null ? "dato-falta" : "")">@(sel.Total is { } total ? $"RD$ {total.ToString("N2", CultureInfo.InvariantCulture)}" : "Falta")</dd></div>
+                    <div><dt>Categoría</dt><dd>@(sel.Categoria ?? CodigosDgii606.CategoriaPorDefecto)</dd></div>
+                    <div><dt>Forma de pago</dt><dd>@(sel.FormaPago ?? CodigosDgii606.FormaPagoPorDefecto)</dd></div>
+                </dl>
+
+                @if (sel.Dudas.Count > 0)
+                {
+                    <div class="panel-dudas">
+                        <p class="texto-etiqueta">Dudas de la lectura</p>
+                        <p class="texto-apoyo">No es un error tuyo: son cosas que la foto no dejó claras.</p>
+                        <ul>
+                            @foreach (var d in sel.Dudas)
+                            {
+                                <li><b>@d.Campo:</b> @d.Motivo</li>
+                            }
+                        </ul>
+                        <button type="button" class="btn-qf btn-qf-secundario boton-marcar-completa" @onclick="() => MarcarCompletaAsync(sel)">
+                            Ya revisé esto, marcar como completa
+                        </button>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="tarjetas-moviles vista-movil">
+        @foreach (var f in FacturasOrdenadas)
+        {
+            var grupoDup = ObtenerGrupoDuplicado(f);
+            var expandida = _expandidas.Contains(f.Id);
+            var problema = ResumenProblema(f, grupoDup);
+            <div class="tarjeta-factura tarjeta-qf @(grupoDup is { } g ? $"fila-dup-{ColorDup(g)}" : "")">
+                <div class="tarjeta-cabecera">
+                    <input type="checkbox" checked="@_marcadas.Contains(f.Id)" @onchange="e => AlternarSeleccion(f.Id, e.Value is true)" />
+                    <div class="tarjeta-estado">
+                        <span class="pastilla @EstadoClase(f.Estado)">@EstadoTexto(f.Estado)</span>
+                        @if (grupoDup is not null)
+                        {
+                            <span class="pastilla pastilla-dup-@ColorDup(grupoDup.Value)">Dup @grupoDup</span>
+                        }
+                    </div>
+                </div>
+
+                <p class="texto-cuerpo-grande tarjeta-rnc">RNC @(string.IsNullOrWhiteSpace(f.Rnc) ? "— sin leer" : f.Rnc)</p>
+                <p class="texto-apoyo tarjeta-ncf-fecha">@(f.Ncf ?? "sin NCF") · @(f.Fecha?.ToString("dd/MM/yyyy") ?? "sin fecha")</p>
+
+                <div class="tarjeta-total">
+                    <span class="texto-apoyo">Total</span>
+                    <span class="texto-cuerpo-grande monto">RD$ @((f.Total ?? 0).ToString("N2", CultureInfo.InvariantCulture))</span>
+                </div>
+
+                @if (problema is not null)
+                {
+                    <p class="texto-apoyo tarjeta-problema">⚠ @problema</p>
+                }
+
+                <div class="tarjeta-acciones">
+                    <button class="btn-qf btn-qf-secundario" @onclick="() => AlternarExpandida(f.Id)">
+                        @(expandida ? "Ocultar" : "Ver y corregir los datos")
+                    </button>
+                    <a class="btn-qf btn-qf-texto" href="/api/fotos/@f.Id" target="_blank"><Icono Nombre="foto" /> Foto</a>
+                </div>
+
+                @if (expandida)
+                {
+                    <div class="tarjeta-edicion">
+                        <label class="texto-etiqueta">RNC
+                            <input class="celda-qf @(string.IsNullOrWhiteSpace(f.Rnc) ? "celda-falta" : "")" placeholder="Falta" value="@f.Rnc" @onchange="async e => { f.Rnc = e.Value?.ToString(); await GuardarAsync(f); }" />
+                        </label>
+                        <label class="texto-etiqueta">NCF
+                            <input class="celda-qf @(string.IsNullOrWhiteSpace(f.Ncf) ? "celda-falta" : "")" placeholder="Falta" value="@f.Ncf" @onchange="async e => { f.Ncf = e.Value?.ToString(); await GuardarAsync(f); }" />
+                        </label>
+                        <label class="texto-etiqueta">Fecha
+                            <input class="celda-qf @(f.Fecha is null ? "celda-falta" : "")" type="date" value="@(f.Fecha?.ToString("yyyy-MM-dd"))" @onchange="async e => { f.Fecha = DateOnly.TryParse(e.Value?.ToString(), out var d) ? d : null; await GuardarAsync(f); }" />
+                        </label>
+                        <div class="tarjeta-edicion-fila">
+                            <label class="texto-etiqueta">ITBIS
+                                <input class="celda-qf monto @(f.Itbis is null ? "celda-falta" : "")" placeholder="Falta" value="@f.Itbis" @onchange="async e => { f.Itbis = ParseDecimal(e.Value); await GuardarAsync(f); }" />
+                            </label>
+                            <label class="texto-etiqueta">Total
+                                <input class="celda-qf monto @(f.Total is null ? "celda-falta" : "")" value="@f.Total" @onchange="async e => { f.Total = ParseDecimal(e.Value); await GuardarAsync(f); }" />
+                            </label>
+                        </div>
+                        <label class="texto-etiqueta">Categoría
+                            <select class="celda-qf" value="@(f.Categoria ?? CodigosDgii606.CategoriaPorDefecto)" @onchange="async e => { f.Categoria = e.Value?.ToString(); await GuardarAsync(f); }">
+                                @foreach (var opcion in CodigosDgii606.TipoBienesYServiciosComprados)
+                                {
+                                    <option value="@opcion">@opcion</option>
+                                }
+                            </select>
+                        </label>
+                        <label class="texto-etiqueta">Forma de pago
+                            <select class="celda-qf" value="@(f.FormaPago ?? CodigosDgii606.FormaPagoPorDefecto)" @onchange="async e => { f.FormaPago = e.Value?.ToString(); await GuardarAsync(f); }">
+                                @foreach (var opcion in CodigosDgii606.FormaDePago)
+                                {
+                                    <option value="@opcion">@opcion</option>
+                                }
+                            </select>
+                        </label>
+
+                        @if (f.Dudas.Count > 0)
+                        {
+                            <div class="panel-dudas">
+                                <p class="texto-etiqueta">Dudas de la lectura</p>
+                                <p class="texto-apoyo">No es un error tuyo: son cosas que la foto no dejó claras.</p>
+                                <ul>
+                                    @foreach (var d in f.Dudas)
+                                    {
+                                        <li><b>@d.Campo:</b> @d.Motivo</li>
+                                    }
+                                </ul>
+                                <button type="button" class="btn-qf btn-qf-secundario boton-marcar-completa" @onclick="() => MarcarCompletaAsync(f)">
+                                    Ya revisé esto, marcar como completa
+                                </button>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+        <p class="texto-apoyo pie-tabla-movil monto">Total del mes: RD$ @TotalDelMes.ToString("N2", CultureInfo.InvariantCulture)</p>
+    </div>
+}
+
+@if (_confirmandoEliminar)
+{
+    <div class="overlay">
+        <div class="modal-confirmar tarjeta-qf">
+            <p class="texto-cuerpo-grande">¿Eliminar @_marcadas.Count factura(s) seleccionada(s)? Esta acción no se puede deshacer.</p>
+            <div class="modal-botones">
+                <button class="btn-qf btn-qf-secundario" @onclick="() => _confirmandoEliminar = false">Cancelar</button>
+                <button class="btn-qf btn-qf-destructivo" @onclick="ConfirmarEliminarAsync">Sí, eliminar</button>
+            </div>
+        </div>
+    </div>
+}
+
+<style>
+    .topbar { display: flex; justify-content: space-between; align-items: center; padding: 1.25rem 1.5rem; flex-wrap: wrap; gap: 1rem; }
+    .marca-topbar { display: flex; align-items: center; gap: .75rem; }
+    .login-logo-chico { width: 40px; height: 40px; border-radius: 12px; font-size: 15px; margin: 0; }
+    .titulo-topbar { font-size: 21px; color: var(--brand); }
+    .subtitulo-topbar { margin: 0; }
+    .acciones-top { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .estado-carga { margin: 0 1.5rem 1rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .estado-vacio { text-align: center; padding: 3.5rem 1.5rem; margin: 0 1.5rem; color: var(--ink2); }
+    .estado-vacio-sub { max-width: 460px; margin: .5rem auto 0; }
+    .resumen-fila { display: flex; justify-content: space-between; align-items: center; padding: 0 1.5rem; flex-wrap: wrap; gap: .75rem; }
+    .conteos { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    .pastilla-boton { margin: 0; cursor: pointer; transition: opacity .12s, box-shadow .12s; }
+    .pastilla-boton:hover { opacity: .85; }
+    .conteos:has(.pastilla-activa) .pastilla-boton:not(.pastilla-activa) { opacity: .5; }
+    .pastilla-activa { box-shadow: 0 0 0 2px var(--ink); }
+    .boton-ver-todas { height: auto; padding: 0 .5rem; font-size: 14px; }
+    .orden-nota { padding: .35rem 1.5rem 0; }
+    /* La tabla usa el scroll normal de la ventana (crece con el contenido). El panel
+       de la derecha, en cambio, tiene su propio alto acotado + scroll interno — se
+       calcula restándole a la ventana lo que ocupa arriba (topbar + fila de pastillas
+       + nota de orden + el padding de .contenido) — y se mantiene "sticky" para seguir
+       a la vista mientras se escrolea la ventana a través de la tabla. Escrolear
+       adentro del panel nunca mueve la tabla: son dos áreas de scroll separadas. */
+    .altura-panel { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+    .contenido { display: flex; gap: 1rem; padding: 1rem 1.5rem 2rem; align-items: flex-start; }
+    .tabla-wrap { flex: 1; overflow-x: auto; min-width: 0; }
+    .tabla-facturas { border-collapse: collapse; font-size: 15px; table-layout: fixed; }
+    .tabla-facturas th { text-align: left; padding: .7rem .6rem; border-bottom: 2px solid var(--line2); color: var(--ink2); font-size: 15px; font-weight: 600; white-space: nowrap; position: sticky; top: 0; background: var(--surface); z-index: 1; }
+    .col-resizer { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 2; }
+    .col-resizer:hover, .col-resizer.resizing { background: var(--brand-t2); }
+    .tabla-facturas td { padding: .3rem .5rem; border-bottom: 1px solid var(--line2); white-space: nowrap; border-left: 4px solid transparent; }
+    .tabla-facturas td:first-child { border-left: none; }
+    .tabla-facturas tr td:nth-child(2) { border-left-width: 4px; }
+    .tabla-facturas input.celda-qf, .tabla-facturas select.celda-qf { max-width: 100%; }
+    .tabla-facturas input.celda-qf[readonly] { background: transparent; border-color: transparent; cursor: default; }
+    .tabla-facturas input.celda-qf[readonly]:hover { border-color: var(--line2); }
+    .fila-seleccionada td { background: var(--brand-t); }
+    .celda-num { width: 90px; text-align: right; }
+    .celda-select { width: 100%; }
+    .boton-foto { height: 36px; width: 36px; padding: 0; font-size: 18px; }
+    .pie-tabla { display: flex; justify-content: space-between; align-items: center; padding: .75rem 1rem; flex-wrap: wrap; gap: .5rem; }
+    .panel-detalle { width: 320px; padding: 1.25rem; flex-shrink: 0; }
+    .panel-detalle-cabecera { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .5rem; }
+    .etiqueta-panel { color: var(--ink3); margin: 0; }
+    .ver-foto-grande { display: block; text-decoration: none; }
+    .ver-foto-grande .texto-apoyo { display: block; text-align: center; margin-top: .4rem; color: var(--brand); }
+    .foto-preview { width: 100%; border-radius: 10px; display: block; }
+    .panel-datos { margin: 1.1rem 0 0; display: flex; flex-direction: column; gap: .55rem; }
+    .panel-datos > div { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; border-bottom: 1px solid var(--line2); padding-bottom: .4rem; }
+    .panel-datos dt { color: var(--ink3); font-size: 14px; flex-shrink: 0; }
+    .panel-datos dd { margin: 0; font-weight: 600; text-align: right; min-width: 0; overflow-wrap: break-word; }
+    .panel-datos dd.dato-falta { color: var(--b-ink); }
+    .panel-dudas { margin-top: 1.25rem; background: var(--w-bg); color: var(--w-ink); border-radius: 10px; padding: .9rem; }
+    .panel-dudas ul { margin: .5rem 0 0 1.1rem; }
+    .boton-marcar-completa { margin-top: .8rem; width: 100%; }
+    .overlay { position: fixed; inset: 0; background: rgba(27,42,51,.45); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .modal-confirmar { padding: 1.75rem; width: 340px; }
+    .modal-botones { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.25rem; }
+
+    /* Parejas de NCF duplicado — cada grupo tiene su propio color de barra + pastilla */
+    .fila-dup-1 td:nth-child(2) { border-left-color: #7C5295; }
+    .fila-dup-2 td:nth-child(2) { border-left-color: #0E7C86; }
+    .fila-dup-3 td:nth-child(2) { border-left-color: #A6337C; }
+    .fila-dup-4 td:nth-child(2) { border-left-color: #4C5FD5; }
+    .pastilla-dup-1 { background: #EEE5F3; color: #5A3A73; margin-left: .3rem; }
+    .pastilla-dup-2 { background: #DCEFF0; color: #0A5860; margin-left: .3rem; }
+    .pastilla-dup-3 { background: #F3E1EC; color: #7A2758; margin-left: .3rem; }
+    .pastilla-dup-4 { background: #E4E7FA; color: #3A469E; margin-left: .3rem; }
+
+    /* --- Vista de celular: tarjetas en vez de tabla --- */
+    .vista-movil { display: none; }
+
+    @@media (max-width: 860px) {
+        .vista-escritorio { display: none; }
+        .vista-movil { display: block; padding: 0 1rem 2rem; }
+    }
+
+    .tarjeta-factura { padding: 1rem; margin-bottom: .75rem; border-left: 4px solid transparent; }
+    .tarjeta-cabecera { display: flex; align-items: center; gap: .6rem; margin-bottom: .6rem; }
+    .tarjeta-estado { display: flex; gap: .35rem; flex-wrap: wrap; }
+    .tarjeta-rnc { margin: 0 0 .15rem; font-weight: 600; }
+    .tarjeta-ncf-fecha { margin: 0 0 .6rem; }
+    .tarjeta-total { display: flex; justify-content: space-between; align-items: baseline; padding: .5rem 0; border-top: 1px solid var(--line2); border-bottom: 1px solid var(--line2); margin-bottom: .6rem; }
+    .tarjeta-problema { color: var(--w-ink); margin: 0 0 .6rem; }
+    .tarjeta-acciones { display: flex; gap: .5rem; }
+    .tarjeta-acciones .btn-qf-secundario { flex: 1; }
+    .tarjeta-edicion { display: flex; flex-direction: column; gap: .7rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line2); }
+    .tarjeta-edicion label { display: flex; flex-direction: column; gap: .3rem; }
+    .tarjeta-edicion .celda-qf, .tarjeta-edicion select { border-color: var(--line); }
+    .tarjeta-edicion-fila { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .tarjeta-edicion-fila label { flex: 1 1 100px; min-width: 0; }
+    .pie-tabla-movil { text-align: right; padding: .5rem .25rem; }
+</style>
+
+@code {
+    private static readonly CultureInfo CulturaEs = new("es-DO");
+
+    private List<FacturaExtraida> _facturas = [];
+    private Dictionary<string, int> _conteoNcf = new();
+    private Dictionary<string, int> _grupoDuplicado = new(); // Ncf -> número de grupo, solo para los que se repiten
+    private int? _seleccionId;
+    private (int Id, string Campo)? _editando; // celda de la tabla actualmente en modo edición (doble clic)
+    private EstadoFactura? _filtroEstado; // clic en una pastilla de conteo filtra por ese estado
+    private HashSet<int> _marcadas = [];
+    private HashSet<int> _expandidas = []; // tarjetas de celular abiertas para editar
+    private bool _procesando;
+    private int _totalProcesar;
+    private int _procesados;
+    private string? _error;
+    private bool _confirmandoEliminar;
+    private string _carpetaFotos = string.Empty;
+    private bool _resizeJsInitDone; // ver OnAfterRenderAsync — el resize de columnas se conecta una sola vez
+
+    private string MesActual => CulturaEs.TextInfo.ToTitleCase(DateTime.Now.ToString("MMMM yyyy", CulturaEs));
+    private decimal TotalDelMes => _facturas.Sum(f => f.Total ?? 0);
+
+    private FacturaExtraida? _facturaSeleccionada => _facturas.FirstOrDefault(f => f.Id == _seleccionId);
+
+    /// <summary>
+    /// Orden pensado para revisión rápida: primero lo que falta arreglar (rojo), luego
+    /// lo que tiene dudas (amarillo), y al final lo completo (verde). Dentro de cada
+    /// grupo, las facturas con NCF duplicado se juntan una al lado de la otra (ordenadas
+    /// por NCF) para poder compararlas de un vistazo.
+    /// </summary>
+    private List<FacturaExtraida> FacturasOrdenadas => _facturas
+        .Where(f => _filtroEstado is null || f.Estado == _filtroEstado)
+        .OrderBy(f => RangoEstado(f.Estado))
+        .ThenByDescending(f => ObtenerGrupoDuplicado(f) is not null)
+        .ThenBy(f => f.Ncf)
+        .ThenBy(f => f.FechaCarga)
+        .ToList();
+
+    private static int RangoEstado(EstadoFactura estado) => estado switch
+    {
+        EstadoFactura.CamposFaltantes => 0,
+        EstadoFactura.RevisarDudas => 1,
+        _ => 2
+    };
+
+    private int? ObtenerGrupoDuplicado(FacturaExtraida f) =>
+        !string.IsNullOrWhiteSpace(f.Ncf) && _grupoDuplicado.TryGetValue(f.Ncf!, out var numero) ? numero : null;
+
+    /// <summary>Ciclo de 4 colores para que grupos de duplicados consecutivos no se repitan.</summary>
+    private static int ColorDup(int grupo) => ((grupo - 1) % 4) + 1;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var rutas = RutasOpt.Value;
+        _carpetaFotos = rutas.Resolver(Env.ContentRootPath, rutas.CarpetaFotos);
+        Directory.CreateDirectory(_carpetaFotos);
+        await CargarFacturasAsync();
+    }
+
+    private async Task CargarFacturasAsync()
+    {
+        _facturas = await Facturas.ListarAsync();
+        RecalcularDuplicados();
+    }
+
+    /// <summary>
+    /// Conecta el arrastre para redimensionar columnas (tabla-resize.js) una sola vez,
+    /// apenas la tabla tiene filas — el encabezado/colgroup no se vuelve a recrear
+    /// después, así que no hace falta reconectar en cada render.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_resizeJsInitDone && _facturas.Count > 0)
+        {
+            await JS.InvokeVoidAsync("quickfiscalTabla.initResize", "tabla-facturas");
+            _resizeJsInitDone = true;
+        }
+    }
+
+    /// <summary>
+    /// Recalcula qué NCF se repiten y les asigna un número de grupo estable (mismo NCF
+    /// = mismo número), para que se pueda ver a simple vista cuáles hacen pareja.
+    /// Se llama tanto al recargar la lista completa como después de cada edición manual.
+    /// </summary>
+    private void RecalcularDuplicados()
+    {
+        _conteoNcf = _facturas
+            .Where(f => !string.IsNullOrWhiteSpace(f.Ncf))
+            .GroupBy(f => f.Ncf!)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        _grupoDuplicado = _conteoNcf
+            .Where(kv => kv.Value > 1)
+            .OrderBy(kv => kv.Key)
+            .Select((kv, indice) => (kv.Key, Numero: indice + 1))
+            .ToDictionary(x => x.Key, x => x.Numero);
+    }
+
+    private async Task OnFilesSelected(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        var archivos = e.GetMultipleFiles(maximumFileCount: 500);
+        _totalProcesar = archivos.Count;
+        _procesados = 0;
+        _procesando = true;
+        StateHasChanged();
+
+        foreach (var archivo in archivos)
+        {
+            try
+            {
+                await ProcesarUnArchivoAsync(archivo);
+            }
+            catch (Exception ex)
+            {
+                _error = $"Error procesando \"{archivo.Name}\": {ex.Message}";
+                Logger.LogError(ex, "Error procesando archivo cargado {Nombre}", archivo.Name);
+            }
+
+            _procesados++;
+            StateHasChanged();
+        }
+
+        _procesando = false;
+        await CargarFacturasAsync();
+    }
+
+    private async Task ProcesarUnArchivoAsync(IBrowserFile archivo)
+    {
+        await using var stream = archivo.OpenReadStream(maxAllowedSize: 30_000_000);
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms);
+        var bytes = ms.ToArray();
+
+        var nombreOriginal = archivo.Name;
+        var mediaType = archivo.ContentType;
+
+        if (Conversor.EsHeic(nombreOriginal))
+        {
+            bytes = Conversor.ConvertirAJpeg(bytes);
+            mediaType = "image/jpeg";
+            nombreOriginal = Path.ChangeExtension(nombreOriginal, ".jpg");
+        }
+
+        if (mediaType is not ("image/jpeg" or "image/png" or "image/webp" or "image/gif"))
+            mediaType = "image/jpeg";
+
+        var nombreArchivo = $"{Guid.NewGuid():N}_{nombreOriginal}";
+        var rutaDestino = Path.Combine(_carpetaFotos, nombreArchivo);
+        await File.WriteAllBytesAsync(rutaDestino, bytes);
+
+        var factura = await Extractor.ProcesarAsync(bytes, mediaType, rutaDestino);
+        await Facturas.AgregarAsync(factura);
+    }
+
+    private void AlternarSeleccion(int id, bool marcado)
+    {
+        if (marcado) _marcadas.Add(id);
+        else _marcadas.Remove(id);
+    }
+
+    private void AlternarExpandida(int id)
+    {
+        if (!_expandidas.Add(id)) _expandidas.Remove(id);
+    }
+
+    /// <summary>
+    /// Las celdas editables de la tabla de escritorio empiezan de solo lectura para que
+    /// un clic simple seleccione la factura en vez de ponerse a escribir por accidente;
+    /// solo se habilitan con doble clic (ver <see cref="EmpezarEdicion"/>).
+    /// </summary>
+    private bool EstaEditando(int id, string campo) => _editando == (id, campo);
+
+    private void EmpezarEdicion(int id, string campo) => _editando = (id, campo);
+
+    private void TerminarEdicion() => _editando = null;
+
+    /// <summary>
+    /// El usuario confirma que una factura marcada "por revisar" en realidad está bien
+    /// (las dudas del OCR no eran un problema real) — se descartan las dudas y el estado
+    /// pasa a "Completa" automáticamente (ver <see cref="FacturaExtraida.Estado"/>).
+    /// </summary>
+    private async Task MarcarCompletaAsync(FacturaExtraida f)
+    {
+        f.Dudas = [];
+        await GuardarAsync(f);
+    }
+
+    /// <summary>Clic en una pastilla de conteo filtra la lista por ese estado; clic de nuevo la quita.</summary>
+    private void AlternarFiltro(EstadoFactura estado)
+    {
+        _filtroEstado = _filtroEstado == estado ? null : estado;
+    }
+
+    /// <summary>
+    /// Resumen en una línea de qué le falta a la factura, para la tarjeta de celular
+    /// (equivalente a "No se encontró el RNC" / "Este NCF está repetido en el mes" del
+    /// diseño). Devuelve null si no hay nada que avisar.
+    /// </summary>
+    private static string? ResumenProblema(FacturaExtraida f, int? grupoDuplicado)
+    {
+        var problemas = new List<string>();
+
+        if (string.IsNullOrWhiteSpace(f.Rnc)) problemas.Add("No se encontró el RNC");
+        if (string.IsNullOrWhiteSpace(f.Ncf)) problemas.Add("No se encontró el NCF");
+        if (f.Fecha is null) problemas.Add("No se pudo leer la fecha");
+        if (f.Itbis is null) problemas.Add("No aparece el ITBIS");
+        if (f.Total is null) problemas.Add("No se encontró el total");
+        if (grupoDuplicado is not null) problemas.Add("Este NCF está repetido en el mes");
+        if (problemas.Count == 0 && f.Dudas.Count > 0) problemas.Add(f.Dudas[0].Motivo);
+
+        if (problemas.Count == 0) return null;
+        return problemas.Count == 1 ? problemas[0] : $"{problemas[0]} · y {problemas.Count - 1} más";
+    }
+
+    private async Task GuardarAsync(FacturaExtraida f)
+    {
+        await Facturas.ActualizarAsync(f);
+        RecalcularDuplicados(); // el NCF pudo cambiar — refresca los grupos y el orden ya
+    }
+
+    private async Task ConfirmarEliminarAsync()
+    {
+        await Facturas.EliminarAsync(_marcadas);
+        _marcadas.Clear();
+        _confirmandoEliminar = false;
+        await CargarFacturasAsync();
+    }
+
+    private static decimal? ParseDecimal(object? valor) =>
+        decimal.TryParse(valor?.ToString(), out var d) ? d : null;
+
+    private static string EstadoClase(EstadoFactura estado) => estado switch
+    {
+        EstadoFactura.Completa => "pastilla-verde",
+        EstadoFactura.RevisarDudas => "pastilla-amarilla",
+        _ => "pastilla-roja"
+    };
+
+    private static string EstadoTexto(EstadoFactura estado) => estado switch
+    {
+        EstadoFactura.Completa => "Completa",
+        EstadoFactura.RevisarDudas => "Revisar",
+        _ => "Faltan datos"
+    };
+}

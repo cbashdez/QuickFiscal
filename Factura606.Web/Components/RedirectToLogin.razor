@@ -1,0 +1,10 @@
+@inject NavigationManager NavigationManager
+
+@code {
+    protected override void OnInitialized()
+    {
+        // forceLoad: true porque el login es una página estática servida fuera del
+        // circuito de Blazor Server (necesita emitir la cookie con un POST normal).
+        NavigationManager.NavigateTo("/login", forceLoad: true);
+    }
+}
